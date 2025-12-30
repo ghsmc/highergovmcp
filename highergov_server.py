@@ -5,9 +5,9 @@ from fastmcp import FastMCP
 
 mcp = FastMCP("highergov-mcp")
 
-HIGHERGOV_API_KEY = os.environ.get("HIGHERGOV_API_KEY")
+HIGHERGOV_API_KEY = os.environ.get("HIGHER_GOV_API_KEY")
 if not HIGHERGOV_API_KEY:
-    raise RuntimeError("Missing HIGHERGOV_API_KEY env var")
+    raise RuntimeError("Missing HIGHER_GOV_API_KEY env var")
 
 BASE_URL = "https://www.highergov.com/api-external"
 
