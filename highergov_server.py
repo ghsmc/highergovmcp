@@ -312,7 +312,7 @@ async def search_awardees(
         page_size: Results per page (max 100)
 
     Returns:
-        Paginated list of awardees/contractors with certifications
+        Paginated list of awardees/contractors with certifications and business types
     """
     data = await hg_get("awardee", {
         "cage_code": cage_code,
@@ -329,29 +329,236 @@ async def search_awardees(
     for a in data.get("results", []):
         primary_naics_obj = a.get("primary_naics") or {}
         naics_list = a.get("naics_codes") or []
+        psc_list = a.get("psc_codes") or []
+        bus_type_info = a.get("bus_type_info") or []
+        parent = a.get("awardee_key_parent") or {}
+
+        # Extract certification info with SBA-certified flag
+        certifications = []
+        for bt in bus_type_info:
+            if isinstance(bt, dict):
+                certifications.append({
+                    "type": bt.get("bus_type"),
+                    "description": bt.get("bus_type_description"),
+                    "sba_certified": bt.get("cert_flag", False),
+                })
 
         awardees.append({
             "awardee_key": a.get("awardee_key"),
             "name": a.get("clean_name"),
             "legal_name": a.get("legal_business_name"),
             "dba_name": a.get("dba_name"),
+            "division_name": a.get("division_name"),
             "cage_code": a.get("cage_code"),
             "uei": a.get("uei"),
-            "address": a.get("physical_address_line_1"),
-            "city": a.get("physical_address_city"),
-            "state": a.get("physical_address_province_or_state"),
-            "zip": a.get("physical_address_zip_postal_code"),
-            "country": a.get("physical_address_country_code"),
+            "address": {
+                "line1": a.get("physical_address_line_1"),
+                "line2": a.get("physical_address_line_2"),
+                "city": a.get("physical_address_city"),
+                "state": a.get("physical_address_province_or_state"),
+                "zip": a.get("physical_address_zip_postal_code"),
+                "country": a.get("physical_address_country_code"),
+            },
             "website": a.get("website"),
             "year_founded": a.get("year_founded"),
             "employee_count": a.get("employee_count"),
             "primary_naics": primary_naics_obj.get("naics_code") if isinstance(primary_naics_obj, dict) else primary_naics_obj,
             "naics_codes": [n.get("naics_code") if isinstance(n, dict) else n for n in naics_list],
-            "registration_status": a.get("purpose_of_registration"),
-            "registration_expiration": a.get("registration_expiration_date"),
-            "sam_extract_code": a.get("sam_extract_code"),
-            "govt_contact_name": f"{a.get('govt_bus_poc_first_name', '')} {a.get('govt_bus_poc_last_name', '')}".strip(),
-            "govt_contact_title": a.get("govt_bus_poc_title"),
+            "psc_codes": [p.get("psc_code") if isinstance(p, dict) else p for p in psc_list],
+            "certifications": certifications,
+            "parent_company": {
+                "awardee_key": parent.get("awardee_key") if isinstance(parent, dict) else None,
+                "name": parent.get("clean_name") if isinstance(parent, dict) else None,
+            } if parent else None,
+            "registration": {
+                "status": a.get("purpose_of_registration"),
+                "initial_date": a.get("initial_registration_date"),
+                "expiration_date": a.get("registration_expiration_date"),
+                "last_update": a.get("registration_last_update_date"),
+                "sam_extract_code": a.get("sam_extract_code"),
+            },
+            "govt_poc": {
+                "name": f"{a.get('govt_bus_poc_first_name', '')} {a.get('govt_bus_poc_last_name', '')}".strip() or None,
+                "title": a.get("govt_bus_poc_title"),
+                "phone": a.get("govt_bus_poc_phone"),
+                "email": a.get("govt_bus_poc_email"),
+            },
+            "highergov_url": a.get("path"),
+        })
+
+    return {
+        "total_count": data.get("meta", {}).get("total_count", 0),
+        "page": page_number,
+        "awardees": awardees,
+    }
+
+
+@mcp.tool
+async def get_awardee_details(
+    awardee_key: int | None = None,
+    cage_code: str | None = None,
+    uei: str | None = None,
+) -> dict:
+    """
+    Get comprehensive details for a specific awardee/contractor.
+    Use this for detailed entity lookup when you have an identifier.
+
+    Args:
+        awardee_key: HigherGov awardee key (preferred - most precise)
+        cage_code: CAGE code
+        uei: Unique Entity Identifier
+
+    Returns:
+        Full entity details including all certifications, codes, contacts, and business info
+    """
+    if not any([awardee_key, cage_code, uei]):
+        return {"error": "At least one identifier required: awardee_key, cage_code, or uei"}
+
+    data = await hg_get("awardee", {
+        "awardee_key": awardee_key,
+        "cage_code": cage_code,
+        "uei": uei,
+        "page_size": 1,
+    })
+
+    results = data.get("results", [])
+    if not results:
+        return {"error": "Awardee not found", "awardee": None}
+
+    a = results[0]
+    primary_naics_obj = a.get("primary_naics") or {}
+    naics_list = a.get("naics_codes") or []
+    psc_list = a.get("psc_codes") or []
+    bus_type_info = a.get("bus_type_info") or []
+    parent = a.get("awardee_key_parent") or {}
+
+    # Extract all certifications with SBA-certified flag
+    certifications = []
+    sba_certified_types = []
+    self_certified_types = []
+    for bt in bus_type_info:
+        if isinstance(bt, dict):
+            cert = {
+                "type": bt.get("bus_type"),
+                "description": bt.get("bus_type_description"),
+                "sba_certified": bt.get("cert_flag", False),
+            }
+            certifications.append(cert)
+            if bt.get("cert_flag"):
+                sba_certified_types.append(bt.get("bus_type_description"))
+            else:
+                self_certified_types.append(bt.get("bus_type_description"))
+
+    return {
+        "awardee": {
+            "awardee_key": a.get("awardee_key"),
+            "name": a.get("clean_name"),
+            "legal_name": a.get("legal_business_name"),
+            "dba_name": a.get("dba_name"),
+            "division_name": a.get("division_name"),
+            "cage_code": a.get("cage_code"),
+            "uei": a.get("uei"),
+            "duns": a.get("duns"),
+            "address": {
+                "line1": a.get("physical_address_line_1"),
+                "line2": a.get("physical_address_line_2"),
+                "city": a.get("physical_address_city"),
+                "state": a.get("physical_address_province_or_state"),
+                "zip": a.get("physical_address_zip_postal_code"),
+                "country": a.get("physical_address_country_code"),
+            },
+            "mailing_address": {
+                "line1": a.get("mailing_address_line_1"),
+                "line2": a.get("mailing_address_line_2"),
+                "city": a.get("mailing_address_city"),
+                "state": a.get("mailing_address_province_or_state"),
+                "zip": a.get("mailing_address_zip_postal_code"),
+                "country": a.get("mailing_address_country_code"),
+            },
+            "website": a.get("website"),
+            "company_info": {
+                "year_founded": a.get("year_founded"),
+                "employee_count": a.get("employee_count"),
+                "entity_type": a.get("entity_type"),
+                "organization_type": a.get("organization_type"),
+                "state_of_incorporation": a.get("state_of_incorporation"),
+                "country_of_incorporation": a.get("country_of_incorporation"),
+            },
+            "naics_codes": {
+                "primary": primary_naics_obj.get("naics_code") if isinstance(primary_naics_obj, dict) else primary_naics_obj,
+                "primary_description": primary_naics_obj.get("naics_title") if isinstance(primary_naics_obj, dict) else None,
+                "all_codes": [n.get("naics_code") if isinstance(n, dict) else n for n in naics_list],
+            },
+            "psc_codes": [p.get("psc_code") if isinstance(p, dict) else p for p in psc_list],
+            "certifications": {
+                "all": certifications,
+                "sba_certified": sba_certified_types,
+                "self_certified": self_certified_types,
+            },
+            "parent_company": {
+                "awardee_key": parent.get("awardee_key") if isinstance(parent, dict) else None,
+                "name": parent.get("clean_name") if isinstance(parent, dict) else None,
+                "cage_code": parent.get("cage_code") if isinstance(parent, dict) else None,
+            } if parent else None,
+            "registration": {
+                "purpose": a.get("purpose_of_registration"),
+                "initial_date": a.get("initial_registration_date"),
+                "activation_date": a.get("activation_date"),
+                "expiration_date": a.get("registration_expiration_date"),
+                "last_update": a.get("registration_last_update_date"),
+                "sam_extract_code": a.get("sam_extract_code"),
+            },
+            "govt_business_poc": {
+                "first_name": a.get("govt_bus_poc_first_name"),
+                "last_name": a.get("govt_bus_poc_last_name"),
+                "title": a.get("govt_bus_poc_title"),
+                "phone": a.get("govt_bus_poc_phone"),
+                "email": a.get("govt_bus_poc_email"),
+            },
+            "highergov_url": a.get("path"),
+        }
+    }
+
+
+@mcp.tool
+async def search_awardees_by_name(
+    name: str,
+    page_number: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """
+    Search for contractors/awardees by company name.
+    Returns matching companies with key identifiers and certifications.
+
+    Args:
+        name: Company name to search (partial match supported)
+        page_number: Page number
+        page_size: Results per page (max 100)
+
+    Returns:
+        List of matching awardees with basic info
+    """
+    data = await hg_get("awardee", {
+        "clean_name": name,
+        "page_number": page_number,
+        "page_size": min(page_size, 100),
+    })
+
+    awardees = []
+    for a in data.get("results", []):
+        bus_type_info = a.get("bus_type_info") or []
+        cert_types = [bt.get("bus_type_description") for bt in bus_type_info if isinstance(bt, dict)]
+
+        awardees.append({
+            "awardee_key": a.get("awardee_key"),
+            "name": a.get("clean_name"),
+            "legal_name": a.get("legal_business_name"),
+            "cage_code": a.get("cage_code"),
+            "uei": a.get("uei"),
+            "city": a.get("physical_address_city"),
+            "state": a.get("physical_address_province_or_state"),
+            "employee_count": a.get("employee_count"),
+            "certifications": cert_types,
             "highergov_url": a.get("path"),
         })
 
@@ -370,7 +577,16 @@ async def get_awardee_certifications(
     page_size: int = 25,
 ) -> dict:
     """
-    Get awardee small business certifications (8a, HUBZone, SDVOSB, WOSB, etc.)
+    Get awardee small business certifications with SBA-certified vs self-certified distinction.
+
+    Certification types include:
+    - 8(a) Business Development Program (SBA-certified)
+    - HUBZone (SBA-certified)
+    - SDVOSB - Service-Disabled Veteran-Owned (VA-verified or self-certified)
+    - WOSB/EDWOSB - Women-Owned (SBA-certified or self-certified)
+    - Small Disadvantaged Business
+    - Minority-Owned
+    - And more...
 
     Args:
         cage_code: CAGE code
@@ -378,7 +594,7 @@ async def get_awardee_certifications(
         primary_naics: Primary NAICS code
 
     Returns:
-        Awardees with certification details
+        Awardees with detailed certification info including SBA-certified flag
     """
     data = await hg_get("awardee", {
         "cage_code": cage_code,
@@ -389,25 +605,143 @@ async def get_awardee_certifications(
 
     awardees = []
     for a in data.get("results", []):
-        certs = a.get("socio_economic", []) or []
-        cert_names = [c.get("description") if isinstance(c, dict) else c for c in certs]
+        bus_type_info = a.get("bus_type_info") or []
+
+        # Parse certifications with SBA-certified flag
+        all_certs = []
+        sba_certified = []
+        self_certified = []
+        for bt in bus_type_info:
+            if isinstance(bt, dict):
+                cert = {
+                    "type": bt.get("bus_type"),
+                    "description": bt.get("bus_type_description"),
+                    "sba_certified": bt.get("cert_flag", False),
+                }
+                all_certs.append(cert)
+                if bt.get("cert_flag"):
+                    sba_certified.append(bt.get("bus_type_description"))
+                else:
+                    self_certified.append(bt.get("bus_type_description"))
 
         awardees.append({
             "awardee_key": a.get("awardee_key"),
             "name": a.get("clean_name"),
             "cage_code": a.get("cage_code"),
             "uei": a.get("uei"),
-            "certifications": cert_names,
-            "small_disadvantaged_business": a.get("small_disadvantaged_business"),
-            "8a_program": a.get("8a_program_participant"),
-            "hubzone": a.get("hubzone"),
-            "woman_owned": a.get("woman_owned_small_business"),
-            "veteran_owned": a.get("veteran_owned_small_business"),
-            "service_disabled_veteran": a.get("service_disabled_veteran_owned_small_business"),
+            "certifications": {
+                "all": all_certs,
+                "sba_certified": sba_certified,
+                "self_certified": self_certified,
+                "count": len(all_certs),
+            },
             "highergov_url": a.get("path"),
         })
 
-    return {"awardees": awardees}
+    return {
+        "total_count": data.get("meta", {}).get("total_count", 0),
+        "awardees": awardees,
+    }
+
+
+@mcp.tool
+async def search_people(
+    last_name: str | None = None,
+    agency_key: int | None = None,
+    page_number: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """
+    Search government contacts and personnel (130K+ records).
+    Useful for finding agency contacts, contracting officers, and program managers.
+
+    Args:
+        last_name: Contact's last name
+        agency_key: HigherGov agency key to filter by agency
+        page_number: Page number
+        page_size: Results per page (max 100)
+
+    Returns:
+        List of government contacts with their agency and contact info
+    """
+    data = await hg_get("people", {
+        "last_name": last_name,
+        "agency_key": agency_key,
+        "page_number": page_number,
+        "page_size": min(page_size, 100),
+    })
+
+    people = []
+    for p in data.get("results", []):
+        agency = p.get("agency") or {}
+        people.append({
+            "person_key": p.get("person_key"),
+            "first_name": p.get("first_name"),
+            "last_name": p.get("last_name"),
+            "title": p.get("title"),
+            "agency": agency.get("agency_name") if isinstance(agency, dict) else agency,
+            "agency_key": agency.get("agency_key") if isinstance(agency, dict) else None,
+            "email": p.get("email"),
+            "phone": p.get("phone"),
+            "highergov_url": p.get("path"),
+        })
+
+    return {
+        "total_count": data.get("meta", {}).get("total_count", 0),
+        "page": page_number,
+        "people": people,
+    }
+
+
+@mcp.tool
+async def search_contract_vehicles(
+    vehicle_name: str | None = None,
+    agency_key: int | None = None,
+    naics_code: str | None = None,
+    page_number: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """
+    Search government contract vehicles (GWACs, BPAs, IDIQs, GSA Schedules).
+    Find which contractors hold positions on major contract vehicles.
+
+    Args:
+        vehicle_name: Contract vehicle name (partial match)
+        agency_key: HigherGov agency key
+        naics_code: NAICS code supported by vehicle
+        page_number: Page number
+        page_size: Results per page (max 100)
+
+    Returns:
+        List of contract vehicles with holder information
+    """
+    data = await hg_get("contract_vehicle", {
+        "vehicle_name": vehicle_name,
+        "agency_key": agency_key,
+        "naics_code": naics_code,
+        "page_number": page_number,
+        "page_size": min(page_size, 100),
+    })
+
+    vehicles = []
+    for v in data.get("results", []):
+        agency = v.get("agency") or {}
+        vehicles.append({
+            "vehicle_key": v.get("vehicle_key"),
+            "name": v.get("vehicle_name"),
+            "abbreviation": v.get("abbreviation"),
+            "agency": agency.get("agency_name") if isinstance(agency, dict) else agency,
+            "vehicle_type": v.get("vehicle_type"),
+            "ordering_start_date": v.get("ordering_start_date"),
+            "ordering_end_date": v.get("ordering_end_date"),
+            "highergov_url": v.get("path"),
+        })
+
+    return {
+        "total_count": data.get("meta", {}).get("total_count", 0),
+        "page": page_number,
+        "vehicles": vehicles,
+    }
 
 
 @mcp.tool
